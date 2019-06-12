@@ -14,29 +14,26 @@ using MoreLinq;
 namespace PCDurableFanOut
 {
     public static class Function1
-
     {
-
-        [FunctionName(nameof(Start_O_MSTest))]
-        public static async Task<HttpResponseMessage> Start_O_MSTest([HttpTrigger("POST", Route = "start")] HttpRequestMessage req, [OrchestrationClient]DurableOrchestrationClient starter, ILogger log)
+        [FunctionName(nameof(StartOrchestrator))]
+        public static async Task<HttpResponseMessage> StartOrchestrator([HttpTrigger("POST", Route = "start")] HttpRequestMessage req, [OrchestrationClient]DurableOrchestrationClient starter, ILogger log)
         {
             var stopWatch = new Stopwatch();
             stopWatch.Start();
 
-            var len = 300;
+            const int numWorkItems = 300;
 
-            string instanceId = await starter.StartNewAsync(nameof(Orchestrator), len);
+            string instanceId = await starter.StartNewAsync(nameof(Orchestrator), numWorkItems);
 
             stopWatch.Stop();
-            log.LogInformation($"********Start_O_MSTest started in {stopWatch.ElapsedMilliseconds}ms for {len} items********");
+            log.LogInformation($"********Start_O_MSTest started in {stopWatch.ElapsedMilliseconds}ms for {numWorkItems} items********");
 
             return starter.CreateCheckStatusResponse(req, instanceId);
        }
 
         [FunctionName(nameof(Orchestrator))]
-        public static async Task Orchestrator([OrchestrationTrigger] DurableOrchestrationContext context, ILogger log)
+        public static async Task<int> Orchestrator([OrchestrationTrigger] DurableOrchestrationContext context, ILogger log)
        {
-
             log.LogInformation($"Orchestrator running");
 
             var start = context.CurrentUtcDateTime;
@@ -45,26 +42,24 @@ namespace PCDurableFanOut
             // call the splitter once so the orchestrator stores this value intead of rerunning it multiple times
             var workItems = await context.CallActivityAsync<IEnumerable<WorkItemBatch>>(nameof(Splitter), numItems);
 
-            var tasks = workItems
-                .Select(x =>
-                {
-                    return context.CallActivityAsync<IEnumerable<int>>(nameof(Worker), x);
-                });
+            var tasks = workItems.Select(x => context.CallActivityAsync<IEnumerable<int>>(nameof(Worker), x));
             var workersResult = await Task.WhenAll(tasks);
 
+            log.LogInformation($"Workers done; compiling results");
             var results = workersResult.Flatten();
 
-            log.LogInformation($"Results compiled {results.Count()} items processed");
+            log.LogInformation($"Results compiled: {results.Count()} items processed");
 
             var end = context.CurrentUtcDateTime;
-            log.LogInformation($"********O_MSTest finished in {(end - start).TotalMilliseconds}ms for {numItems} items********");
+            log.LogInformation($"********Orchestrator finished in {(end - start).TotalMilliseconds}ms for {numItems} items********");
+            return numItems;
         }
 
         // Generates work item batches from the input parameters
         [FunctionName(nameof(Splitter))]
         public static IEnumerable<WorkItemBatch> Splitter([ActivityTrigger]int numItems, ILogger log)
         {
-            const int batchLimit = 50;
+            const int batchLimit = 30;
             int curWorker = 0;
             var list = Enumerable.Range(1, numItems).ToList();
             var tasks = list
@@ -79,16 +74,15 @@ namespace PCDurableFanOut
         public static async Task<IEnumerable<int>> Worker([ActivityTrigger]WorkItemBatch workItemBatch, ILogger log)
         {
             log.LogInformation($"Worker {workItemBatch.workerNumber} started");
-            const int progressSteps = 10;
+            const int progressSteps = 5;
             int progressCount = 0;
-            var list = new List<Task>();
             var rand = new Random();
             var resultList = new List<int>();
             // each worker processes the tasks sequentially not in parallel because it's likely CPU bound or limtied by back-end resoure capacity
             // we're already running multiple workers in parallel -- that's our parallelism (we don't want two levels of parallelism)
             foreach (var item in workItemBatch.items)
             {
-                int len = rand.Next(100, 500);  // ms (wall clock time) each work item takes to process
+                int len = rand.Next(200, 1000);  // ms (wall clock time) each work item takes to process
                 await Task.Delay(len);
                 resultList.Add(len);
                 if (progressCount++ % progressSteps == 0)
